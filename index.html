@@ -9,6 +9,7 @@
     #result { margin-top: 20px; }
     .labelary-link { word-break: break-all; }
   </style>
+  <script src="/config.js"></script>
 </head>
 <body>
   <h1>Shipping Label to ZPL Converter</h1>
@@ -17,6 +18,12 @@
   <div id="result"></div>
 
   <script>
+    // Configuration that will be replaced during build by Netlify
+    const config = {
+      SUPABASE_URL: window.SUPABASE_URL || '',
+      SUPABASE_ANON_KEY: window.SUPABASE_ANON_KEY || ''
+    };
+
     async function convertImage() {
       const fileInput = document.getElementById('imageInput');
       const resultDiv = document.getElementById('result');
@@ -31,11 +38,11 @@
       resultDiv.innerHTML = 'Processing...';
 
       try {
-        const response = await fetch('https://<your-supabase-project>.supabase.co/functions/v1/process-label', {
+        const response = await fetch(`${config.SUPABASE_URL}/functions/v1/process-label`, {
           method: 'POST',
           body: formData,
           headers: {
-            Authorization: `Bearer ${process.env.SUPABASE_ANON_KEY}`
+            Authorization: `Bearer ${config.SUPABASE_ANON_KEY}`
           }
         });
 
