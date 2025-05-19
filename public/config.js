@@ -1,3 +1,4 @@
 // This file will be replaced with environment-specific values during Netlify build
-window.SUPABASE_URL = 'https://your-supabase-project.supabase.co';
-window.SUPABASE_ANON_KEY = 'your-supabase-anon-key';
+window.SUPABASE_URL = 'https://icojvtuoejlgtfxfnrn.supabase.co';
+window.SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFxZ3Zwa2dtd3htdGxwa2JocXhwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MDU1NTY2NjQsImV4cCI6MjAyMTEzMjY2NH0.HNDLqnbg6KPVZVTIXnOPOHLk4e6v5iBEBxQhFJ9E5_c';
+

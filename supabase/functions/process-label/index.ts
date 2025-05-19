@@ -28,7 +28,13 @@ serve(async (req) => {
   );
 
   // Hugging Face Inference API call
-  const huggingFaceApiKey = Deno.env.get("HUGGINGFACE_API_KEY") || "";
+  const huggingFaceApiKey = Deno.env.get("HUGGINGFACE_API_KEY");
+  if (!huggingFaceApiKey) {
+    return new Response(JSON.stringify({ error: "API key configuration error" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
   const modelUrl = "https://api-inference.huggingface.co/models/liuhaotian/llava-13b";
   const response = await fetch(modelUrl, {
     method: "POST",
