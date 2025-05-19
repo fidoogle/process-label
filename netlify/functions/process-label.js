@@ -76,13 +76,24 @@ exports.handler = async (event, context) => {
       };
     }
 
-    const modelUrl = "https://api-inference.huggingface.co/models/liuhaotian/llava-13b";
+    // Update to a more widely available LLaVA model
+    const modelUrl = "https://api-inference.huggingface.co/models/llava-hf/llava-1.5-7b-hf";
+    // Alternative models to try if the above doesn't work:
+    // const modelUrl = "https://api-inference.huggingface.co/models/llava-hf/llava-1.5-13b-hf";
+    // const modelUrl = "https://api-inference.huggingface.co/models/mistralai/mistral-7b-instruct-v0.2";
     console.log(`Making request to Hugging Face API: ${modelUrl}`);
     
-    // Prepare the request body
+    // Prepare the request body with a proper prompt for the LLaVA model
     const requestBody = {
-      inputs: base64Image,
-      parameters: { max_new_tokens: 500 },
+      inputs: {
+        image: base64Image,
+        prompt: "This is a shipping label. Analyze this image and provide: 1) Description: A detailed description of what you see in the label. 2) ZPL: Generate ZPL code that would recreate this label. The ZPL code should be formatted for a Zebra printer."
+      },
+      parameters: { 
+        max_new_tokens: 800,
+        temperature: 0.2,
+        top_p: 0.95
+      },
       options: { wait_for_model: true }
     };
     
