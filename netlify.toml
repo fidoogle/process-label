@@ -11,3 +11,7 @@
 [build.environment]
   # Environment variables will be set in the Netlify UI
   # SUPABASE_ANON_KEY = "your-supabase-anon-key"
+
+[functions]
+  directory = "netlify/functions"
+  

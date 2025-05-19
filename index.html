@@ -21,7 +21,9 @@
     // Configuration that will be replaced during build by Netlify
     const config = {
       SUPABASE_URL: window.SUPABASE_URL || '',
-      SUPABASE_ANON_KEY: window.SUPABASE_ANON_KEY || ''
+      SUPABASE_ANON_KEY: window.SUPABASE_ANON_KEY || '',
+      // Add a flag to determine if we're using Netlify Functions or Supabase Edge Functions
+      USE_NETLIFY_FUNCTIONS: true // Set to true if using Netlify Functions, false for Supabase
     };
 
     async function convertImage() {
@@ -38,12 +40,25 @@
       resultDiv.innerHTML = 'Processing...';
 
       try {
-        const response = await fetch(`${config.SUPABASE_URL}/functions/v1/process-label`, {
+        // Determine which API endpoint to use based on deployment platform
+        let apiUrl;
+        let headers = {};
+        
+        if (config.USE_NETLIFY_FUNCTIONS) {
+          // Netlify Functions endpoint
+          apiUrl = '/functions/process-label';
+          console.log(`Using Netlify Functions: ${apiUrl}`);
+        } else {
+          // Supabase Edge Functions endpoint
+          apiUrl = `${config.SUPABASE_URL}/functions/v1/process-label`;
+          headers.Authorization = `Bearer ${config.SUPABASE_ANON_KEY}`;
+          console.log(`Using Supabase Edge Functions: ${apiUrl}`);
+        }
+        
+        const response = await fetch(apiUrl, {
           method: 'POST',
           body: formData,
-          headers: {
-            Authorization: `Bearer ${config.SUPABASE_ANON_KEY}`
-          }
+          headers: headers
         });
 
         if (!response.ok) throw new Error('Failed to process image');
