@@ -1,0 +1,8 @@
+{
+  "name": "process-label",
+  "version": "1.0.0",
+  "description": "Supabase Edge Function to convert shipping label images to ZPL format",
+  "env": {
+    "HUGGINGFACE_API_KEY": "your-huggingface-api-key"
+  }
+}
