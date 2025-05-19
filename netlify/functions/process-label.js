@@ -79,8 +79,8 @@ exports.handler = async (event, context) => {
     // Try a different model that's definitely available
     // const modelUrl = "https://api-inference.huggingface.co/models/microsoft/florence-2-base";
     // Other alternatives to try:
-    const modelUrl = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large";
-    // const modelUrl = "https://api-inference.huggingface.co/models/nlpconnect/vit-gpt2-image-captioning";
+    // const modelUrl = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large";
+    const modelUrl = "https://api-inference.huggingface.co/models/nlpconnect/vit-gpt2-image-captioning";
     console.log(`Making request to Hugging Face API: ${modelUrl}`);
     
     // Prepare the request body for the image captioning model
