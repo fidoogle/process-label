@@ -46,7 +46,7 @@
         
         if (config.USE_NETLIFY_FUNCTIONS) {
           // Netlify Functions endpoint
-          apiUrl = '/functions/process-label';
+          apiUrl = '/.netlify/functions/process-label';
           console.log(`Using Netlify Functions: ${apiUrl}`);
         } else {
           // Supabase Edge Functions endpoint
