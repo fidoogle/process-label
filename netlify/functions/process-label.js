@@ -13,13 +13,40 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    // Parse the multipart form data
-    const { image } = await parseMultipartForm(event);
+    console.log('Function invoked with method:', event.httpMethod);
+    
+    // Try to parse the multipart form data
+    let image;
+    try {
+      const formData = await parseMultipartForm(event);
+      image = formData.image;
+      console.log('Successfully parsed multipart form data');
+    } catch (formError) {
+      console.log('Error parsing multipart form:', formError.message);
+      console.log('Attempting fallback method...');
+      
+      // Fallback: Try to process the request body directly
+      if (event.body) {
+        try {
+          // Check if the body is JSON
+          const bodyData = JSON.parse(event.body);
+          if (bodyData.image) {
+            // Handle base64 image directly from JSON
+            image = Buffer.from(bodyData.image, 'base64');
+            console.log('Successfully extracted image from JSON body');
+          }
+        } catch (jsonError) {
+          console.log('Body is not JSON, trying as raw image data');
+          // Last resort: treat body as raw image data
+          image = Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8');
+        }
+      }
+    }
     
     if (!image) {
       return {
         statusCode: 400,
-        body: JSON.stringify({ error: 'No image uploaded' })
+        body: JSON.stringify({ error: 'No image uploaded or could not parse image data' })
       };
     }
 
@@ -84,48 +111,85 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({ description, zpl: zplCode })
     };
   } catch (error) {
+    // More detailed error logging
     console.error('Error processing image:', error);
+    console.error('Error stack:', error.stack);
+    
+    // Return a more informative error message
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: `Server error: ${error.message}` })
+      body: JSON.stringify({ 
+        error: `Server error: ${error.message}`, 
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+        type: error.name
+      })
     };
   }
 };
 
 // Helper function to parse multipart form data
 async function parseMultipartForm(event) {
-  const busboy = require('busboy');
-  return new Promise((resolve, reject) => {
-    const result = {};
-    
-    const bb = busboy({ headers: event.headers });
-    
-    bb.on('file', (fieldname, file, info) => {
-      const { filename, encoding, mimeType } = info;
-      const chunks = [];
+  // For debugging
+  console.log('Request headers:', JSON.stringify(event.headers));
+  console.log('Content-Type:', event.headers['content-type'] || event.headers['Content-Type']);
+  
+  // Check if the request is multipart/form-data
+  const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
+  if (!contentType.includes('multipart/form-data')) {
+    console.log('Not a multipart/form-data request');
+    throw new Error('Expected multipart/form-data request');
+  }
+
+  try {
+    const busboy = require('busboy');
+    return new Promise((resolve, reject) => {
+      const result = {};
       
-      file.on('data', (data) => {
-        chunks.push(data);
+      // Create busboy instance with the request headers
+      const bb = busboy({ 
+        headers: {
+          'content-type': contentType
+        }
       });
       
-      file.on('end', () => {
-        result[fieldname] = Buffer.concat(chunks);
+      bb.on('file', (fieldname, file, info) => {
+        console.log(`Processing file: ${fieldname}`);
+        const chunks = [];
+        
+        file.on('data', (data) => {
+          chunks.push(data);
+        });
+        
+        file.on('end', () => {
+          console.log(`File ${fieldname} received, size: ${chunks.reduce((acc, chunk) => acc + chunk.length, 0)} bytes`);
+          result[fieldname] = Buffer.concat(chunks);
+        });
       });
+      
+      bb.on('field', (fieldname, value) => {
+        console.log(`Field received: ${fieldname}`);
+        result[fieldname] = value;
+      });
+      
+      bb.on('finish', () => {
+        console.log('Finished parsing form data');
+        resolve(result);
+      });
+      
+      bb.on('error', (error) => {
+        console.error('Error parsing form data:', error);
+        reject(error);
+      });
+      
+      // Convert the request body to a buffer
+      const buffer = Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8');
+      console.log(`Request body size: ${buffer.length} bytes`);
+      
+      bb.write(buffer);
+      bb.end();
     });
-    
-    bb.on('field', (fieldname, value) => {
-      result[fieldname] = value;
-    });
-    
-    bb.on('finish', () => {
-      resolve(result);
-    });
-    
-    bb.on('error', (error) => {
-      reject(error);
-    });
-    
-    bb.write(Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8'));
-    bb.end();
-  });
+  } catch (error) {
+    console.error('Error in parseMultipartForm:', error);
+    throw error;
+  }
 }
