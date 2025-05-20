@@ -177,44 +177,66 @@ exports.handler = async (event, context) => {
     }
     
     // Replicate API is asynchronous, so we need to poll for the result
-    const maxRetries = 10;
+    const maxRetries = 20; // Increase max retries
     let retries = 0;
     let result = null;
+    
+    console.log(`Starting to poll for prediction ${predictionResponse.id}`);
     
     while (retries < maxRetries) {
       console.log(`Polling for result, attempt ${retries + 1}/${maxRetries}`);
       
       try {
-        const statusResponse = await fetch(`https://api.replicate.com/v1/predictions/${predictionResponse.id}`, {
+        const statusUrl = `https://api.replicate.com/v1/predictions/${predictionResponse.id}`;
+        console.log(`Checking status at: ${statusUrl}`);
+        
+        const statusResponse = await fetch(statusUrl, {
           headers: {
             Authorization: `Token ${replicateApiKey}`
           }
         });
         
+        console.log(`Status response code: ${statusResponse.status}`);
+        
         if (!statusResponse.ok) {
-          console.log(`Error checking prediction status: ${statusResponse.status}`);
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          const errorText = await statusResponse.text();
+          console.log(`Error checking prediction status: ${statusResponse.status}, ${errorText}`);
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Longer wait on error
           retries++;
           continue;
         }
         
         const statusData = await statusResponse.json();
         console.log(`Current status: ${statusData.status}`);
+        console.log(`Full status data: ${JSON.stringify(statusData)}`);
         
         if (statusData.status === 'succeeded') {
+          console.log('Prediction succeeded!');
           result = statusData.output;
+          console.log(`Raw output: ${JSON.stringify(result)}`);
           break;
         } else if (statusData.status === 'failed') {
+          console.log(`Prediction failed: ${statusData.error || 'Unknown error'}`);
           return {
             statusCode: 500,
-            body: JSON.stringify({ error: `Prediction failed: ${statusData.error || 'Unknown error'}` })
+            body: JSON.stringify({ 
+              error: `Prediction failed: ${statusData.error || 'Unknown error'}`,
+              details: statusData
+            })
           };
+        } else if (statusData.status === 'processing') {
+          console.log('Prediction still processing...');
+        } else {
+          console.log(`Unknown status: ${statusData.status}`);
         }
         
-        // Wait before polling again
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait before polling again - increase wait time for each retry
+        const waitTime = 1000 + (retries * 500);
+        console.log(`Waiting ${waitTime}ms before next poll`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
       } catch (pollError) {
         console.error('Error polling for result:', pollError);
+        console.error('Error details:', pollError.stack);
       }
       
       retries++;
@@ -229,20 +251,27 @@ exports.handler = async (event, context) => {
     
     // Process the Replicate API result
     console.log('Processing Replicate API result...');
-    console.log(`Result: ${JSON.stringify(result).substring(0, 200)}...`);
+    console.log(`FULL RESULT: ${JSON.stringify(result)}`);
     
     // For BLIP model, the result is a string or an array with a single string
     let modelOutput = '';
     if (typeof result === 'string') {
+      console.log('Result is a string');
       modelOutput = result;
     } else if (Array.isArray(result) && result.length > 0) {
+      console.log('Result is an array');
       modelOutput = result[0] || '';
+      console.log(`First array element: ${result[0]}`);
     } else if (result && typeof result === 'object') {
+      console.log('Result is an object with keys:', Object.keys(result).join(', '));
       // Try to extract any text we can find
       modelOutput = result.caption || result.text || JSON.stringify(result);
+    } else {
+      console.log('Result is in an unexpected format:', typeof result);
+      modelOutput = JSON.stringify(result);
     }
     
-    console.log(`Model output: ${modelOutput}`);
+    console.log(`FINAL MODEL OUTPUT: ${modelOutput}`);
     console.log(`Model output length: ${modelOutput.length}`);
 
     // Use the caption as the description and generate ZPL code
@@ -253,15 +282,17 @@ exports.handler = async (event, context) => {
     
     try {
       // Parse the description to extract structured information
-      console.log('Parsing description to extract structured information');
+      console.log('PARSING DESCRIPTION:', description);
       
       // Extract potential tracking numbers (sequences of 6+ digits)
       const trackingNumberMatch = description.match(/\b\d{6,}\b/g);
       const trackingNumber = trackingNumberMatch ? trackingNumberMatch[0] : Math.floor(Math.random() * 100000000).toString();
+      console.log('EXTRACTED TRACKING NUMBER:', trackingNumber, 'from match:', trackingNumberMatch);
       
       // Extract potential addresses
       const addressMatch = description.match(/([A-Za-z0-9\s,]+\s(Street|St|Avenue|Ave|Road|Rd|Lane|Ln|Drive|Dr|Court|Ct|Boulevard|Blvd|Way|Place|Pl|Circle|Cir)\s[A-Za-z0-9\s,]+)/i);
       const addressLine = addressMatch ? addressMatch[0] : '';
+      console.log('EXTRACTED ADDRESS:', addressLine, 'from match:', addressMatch);
       
       // Extract city, state, zip
       const locationMatch = description.match(/([A-Za-z\s]+)\s([A-Z]{2})\s(\d{5}(-\d{4})?)/);
@@ -270,6 +301,19 @@ exports.handler = async (event, context) => {
         city = locationMatch[1];
         state = locationMatch[2];
         zip = locationMatch[3];
+        console.log('EXTRACTED LOCATION:', city, state, zip, 'from match:', locationMatch);
+      } else {
+        console.log('NO LOCATION MATCH FOUND');
+      }
+      
+      // Try a simpler pattern for state and zip
+      if (!state && !zip) {
+        const simpleZipMatch = description.match(/\b([A-Z]{2})\s+(\d{5})\b/);
+        if (simpleZipMatch) {
+          state = simpleZipMatch[1];
+          zip = simpleZipMatch[2];
+          console.log('EXTRACTED SIMPLE STATE/ZIP:', state, zip);
+        }
       }
       
       // Extract company name
@@ -283,15 +327,25 @@ exports.handler = async (event, context) => {
         const companyIndex = companyWords.findIndex(w => w.includes(companyMatch[0]));
         if (companyIndex > 0) {
           companyName = companyWords.slice(Math.max(0, companyIndex - 3), companyIndex + 1).join(' ');
+          console.log('EXTRACTED COMPANY:', companyName, 'from match:', companyMatch);
+        }
+      } else {
+        // Try to find any capitalized words at the beginning of lines
+        const capitalizedNameMatch = description.match(/^([A-Z][a-z]+ [A-Z][a-z]+)/m);
+        if (capitalizedNameMatch) {
+          companyName = capitalizedNameMatch[1];
+          console.log('EXTRACTED CAPITALIZED NAME:', companyName);
         }
       }
       
       // Extract any permit or reference numbers
       const permitMatch = description.match(/Permit[:\s]*(\w+)/i);
       const permitNumber = permitMatch ? permitMatch[1] : '';
+      console.log('EXTRACTED PERMIT:', permitNumber, 'from match:', permitMatch);
       
       const refMatch = description.match(/Ref[:\s]*(\w+)/i);
       const refNumber = refMatch ? refMatch[1] : '';
+      console.log('EXTRACTED REF:', refNumber, 'from match:', refMatch);
       
       // Format the current date and time
       const date = new Date().toLocaleDateString();
@@ -368,9 +422,26 @@ exports.handler = async (event, context) => {
     
     console.log('Successfully extracted ZPL code, returning response');
 
+    // Include debug information in the response
     return {
       statusCode: 200,
-      body: JSON.stringify({ description, zpl: zplCode })
+      body: JSON.stringify({ 
+        description, 
+        zpl: zplCode,
+        debug: {
+          modelOutput: modelOutput,
+          extractedData: {
+            trackingNumber,
+            addressLine,
+            city,
+            state,
+            zip,
+            companyName,
+            permitNumber,
+            refNumber
+          }
+        }
+      })
     };
   } catch (error) {
     // More detailed error logging
