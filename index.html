@@ -141,7 +141,7 @@
           console.log(`Polling for results: ${pollUrl}`);
           
           const response = await fetch(pollUrl, {
-            method: 'POST', // Keep using POST to match the original request
+            method: 'GET', // Use GET for status checks
             headers: headers
           });
           

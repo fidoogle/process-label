@@ -1,0 +1,503 @@
+// Netlify Function for processing label images
+const fetch = require('node-fetch');
+const { createReadStream } = require('fs');
+const FormData = require('form-data');
+
+// For debugging purposes
+process.on('unhandledRejection', (reason, promise) => {
+  console.log('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.log('Uncaught Exception:', error);
+});
+
+exports.handler = async (event, context) => {
+  // Check if this is a status check (GET request with predictionId)
+  const isPredictionCheck = event.httpMethod === 'GET' && event.queryStringParameters?.predictionId;
+  
+  // Allow both POST (for initial requests) and GET (for status checks)
+  if (event.httpMethod !== 'POST' && !isPredictionCheck) {
+    return {
+      statusCode: 405,
+      body: JSON.stringify({ error: 'Method not allowed' })
+    };
+  }
+
+  try {
+    console.log('Function invoked with method:', event.httpMethod);
+    console.log('Request headers:', JSON.stringify(event.headers));
+    
+    // Get the prediction ID from query parameters
+    let predictionId = event.queryStringParameters?.predictionId;
+    let base64Image;
+    
+    // Try to get API key from various sources
+    let replicateApiKey = process.env.REPLICATE_API_KEY || process.env.replicate_api_key || process.env.Replicate_Api_Key;
+    
+    // Check request headers for API key (ONLY FOR DEVELOPMENT/TESTING)
+    if (!replicateApiKey && event.headers) {
+      const authHeader = event.headers['x-replicate-api-key'] || event.headers['X-Replicate-Api-Key'];
+      if (authHeader) {
+        console.log('Found API key in request headers');
+        replicateApiKey = authHeader;
+      }
+    }
+    
+    // Check query parameters for API key (ONLY FOR DEVELOPMENT/TESTING)
+    if (!replicateApiKey && event.queryStringParameters) {
+      const queryApiKey = event.queryStringParameters.api_key || event.queryStringParameters.apiKey;
+      if (queryApiKey) {
+        console.log('Found API key in query parameters');
+        replicateApiKey = queryApiKey;
+      }
+    }
+    
+    console.log(`Replicate API Key exists: ${!!replicateApiKey}`);
+    console.log(`REPLICATE_API_KEY from env: ${!!process.env.REPLICATE_API_KEY}`);
+    
+    if (!replicateApiKey) {
+      console.log('Missing Replicate API key from all sources');
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ 
+          error: 'Replicate API key configuration error',
+          message: 'Please set the REPLICATE_API_KEY environment variable in your Netlify dashboard',
+          availableEnvVars: Object.keys(process.env).filter(key => !key.includes('AWS') && !key.includes('SECRET')).join(', ')
+        })
+      };
+    }
+
+    // If this is a status check, skip image processing and check the prediction status
+    if (predictionId) {
+      console.log(`This is a status check for prediction ${predictionId}`);
+      return checkPredictionStatus(predictionId, replicateApiKey);
+    }
+    
+    // Process the image for initial requests
+    let image;
+    try {
+      const formData = await parseMultipartForm(event);
+      image = formData.image;
+      console.log('Successfully parsed multipart form data');
+    } catch (formError) {
+      console.log('Error parsing multipart form:', formError.message);
+      console.log('Attempting fallback method...');
+      
+      // Fallback: Try to process the request body directly
+      if (event.body) {
+        try {
+          // Check if the body is JSON
+          const bodyData = JSON.parse(event.body);
+          if (bodyData.image) {
+            // Handle base64 image directly from JSON
+            image = Buffer.from(bodyData.image, 'base64');
+            console.log('Successfully extracted image from JSON body');
+          }
+        } catch (jsonError) {
+          console.log('Body is not JSON, trying as raw image data');
+          // Last resort: treat body as raw image data
+          image = Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8');
+        }
+      }
+    }
+    
+    if (!image) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: 'No image uploaded or could not parse image data' })
+      };
+    }
+
+    // Convert image to base64
+    base64Image = image.toString('base64');
+    console.log(`Image converted to base64, length: ${base64Image.length}`);
+    
+    // Make initial request to Replicate API
+    const replicateUrl = 'https://api.replicate.com/v1/predictions';
+    console.log(`Making request to Replicate API: ${replicateUrl}`);
+    
+    // Prepare the request body for Replicate
+    const requestBody = {
+      // Specify the model to use
+      version: '2e1dddc8621f72155f24cf2e0adbde548458d3cab9f00c0139eea840d0ac4746', // Salesforce BLIP model
+      // Input parameters
+      input: {
+        image: `data:image/jpeg;base64,${base64Image}`,
+        caption: 'This is a shipping label. Please extract ALL text visible in this image, including sender address, recipient address, tracking numbers, barcodes, and any other information. Format it as a structured description with sections for each component of the label.'
+      }
+    };
+    
+    console.log('Replicate request body prepared');
+    
+    // Send the request to Replicate API
+    let response;
+    try {
+      console.log('Sending request to Replicate API...');
+      response = await fetch(replicateUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Token ${replicateApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+      
+      console.log(`Replicate API response status: ${response.status}`);
+    } catch (apiError) {
+      console.error('Error calling Replicate API:', apiError);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: `API call failed: ${apiError.message}` })
+      };
+    }
+
+    if (!response.ok) {
+      try {
+        const errorText = await response.text();
+        console.log(`Replicate API error response: ${errorText}`);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: `Replicate API error: ${errorText}` })
+        };
+      } catch (textError) {
+        console.error('Error reading error response:', textError);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: `Failed to read error response: ${textError.message}` })
+        };
+      }
+    }
+
+    console.log('Replicate API response was successful, parsing JSON...');
+    let predictionResponse;
+    try {
+      predictionResponse = await response.json();
+      console.log('API response parsed successfully');
+      console.log(`Prediction ID: ${predictionResponse.id}`);
+      console.log(`Prediction status: ${predictionResponse.status}`);
+      
+      // Return the prediction ID immediately so the client can poll for results
+      return {
+        statusCode: 202, // Accepted but processing
+        body: JSON.stringify({
+          message: 'Image processing started',
+          predictionId: predictionResponse.id,
+          status: predictionResponse.status
+        })
+      };
+    } catch (jsonError) {
+      console.error('Error parsing API response as JSON:', jsonError);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: `Failed to parse API response: ${jsonError.message}` })
+      };
+    }
+  } catch (error) {
+    console.error('Unhandled error:', error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: `Unhandled error: ${error.message}` })
+    };
+  }
+};
+
+/**
+ * Check the status of a prediction
+ * @param {string} predictionId - The ID of the prediction to check
+ * @param {string} apiKey - The Replicate API key
+ * @returns {Object} Response object with status code and body
+ */
+async function checkPredictionStatus(predictionId, apiKey) {
+  try {
+    const statusUrl = `https://api.replicate.com/v1/predictions/${predictionId}`;
+    console.log(`Checking status at: ${statusUrl}`);
+    
+    const statusResponse = await fetch(statusUrl, {
+      headers: {
+        Authorization: `Token ${apiKey}`
+      }
+    });
+    
+    if (!statusResponse.ok) {
+      const errorText = await statusResponse.text();
+      console.log(`Error checking prediction status: ${errorText}`);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: `Error checking prediction: ${errorText}` })
+      };
+    }
+    
+    const statusData = await statusResponse.json();
+    console.log(`Status check for ${predictionId}: ${statusData.status}`);
+    
+    if (statusData.status === 'succeeded') {
+      // Prediction is complete, process the result
+      console.log('Prediction succeeded!');
+      const result = statusData.output;
+      console.log(`Raw output: ${JSON.stringify(result)}`);
+      
+      // Process the result and generate ZPL
+      return processCompletedPrediction(result);
+    } else if (statusData.status === 'failed') {
+      console.log(`Prediction failed: ${statusData.error || 'Unknown error'}`);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: `Prediction failed: ${statusData.error || 'Unknown error'}` })
+      };
+    } else {
+      // Still processing, return status info
+      console.log(`Prediction still processing, status: ${statusData.status}`);
+      return {
+        statusCode: 202, // Accepted but still processing
+        body: JSON.stringify({ 
+          status: statusData.status,
+          message: 'Prediction still processing',
+          predictionId: predictionId
+        })
+      };
+    }
+  } catch (error) {
+    console.error('Error checking prediction status:', error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: `Error checking prediction: ${error.message}` })
+    };
+  }
+}
+
+/**
+ * Process a completed prediction result and generate ZPL code
+ * @param {string} result - The text output from the model
+ * @returns {Object} Response object with status code and body
+ */
+function processCompletedPrediction(result) {
+  console.log('Processing completed prediction result');
+  
+  try {
+    // Extract information from the model output
+    const extractedData = extractInformationFromText(result);
+    console.log('Extracted data:', JSON.stringify(extractedData));
+    
+    // Generate ZPL code based on the extracted information
+    const zplCode = generateZPL(extractedData);
+    
+    // Return the result to the client
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        description: extractedData.description || 'Shipping label processed successfully',
+        zpl: zplCode,
+        debug: {
+          modelOutput: result,
+          extractedData: extractedData
+        }
+      })
+    };
+  } catch (error) {
+    console.error('Error processing prediction result:', error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: `Error processing prediction result: ${error.message}` })
+    };
+  }
+}
+
+/**
+ * Extract information from the model's text output
+ * @param {string} text - The text output from the model
+ * @returns {Object} Extracted data
+ */
+function extractInformationFromText(text) {
+  console.log('Extracting information from text');
+  
+  // Initialize the data structure
+  const data = {
+    description: text.substring(0, 200) + '...',  // Truncated description for UI
+    sender: { name: '', address: '', city: '', state: '', zip: '' },
+    recipient: { name: '', address: '', city: '', state: '', zip: '' },
+    trackingNumber: '',
+    serviceType: '',
+    weight: '',
+    dimensions: '',
+    shipDate: '',
+    fullText: text  // Store the full text for reference
+  };
+  
+  try {
+    // Extract tracking number - look for common patterns
+    const trackingPatterns = [
+      /\b(1Z ?[0-9A-Z]{3} ?[0-9A-Z]{3} ?[0-9A-Z]{2} ?[0-9A-Z]{4} ?[0-9A-Z]{3} ?[0-9A-Z])\b/i,  // UPS
+      /\b((98\d\d|\d{4}) ?\d{4} ?\d{4} ?\d{4} ?\d{4} ?\d{2})\b/i,  // USPS
+      /\b(\d{12,14})\b/,  // FedEx
+      /\b([A-Z]{2}\d{9}[A-Z]{2})\b/i  // Some international
+    ];
+    
+    for (const pattern of trackingPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        data.trackingNumber = match[0];
+        console.log(`Found tracking number: ${data.trackingNumber}`);
+        break;
+      }
+    }
+    
+    // Extract sender and recipient information
+    // This is a simplified approach - in a real system, you'd use more sophisticated NLP
+    const fromMatch = text.match(/From:?([^\n]+)/i) || text.match(/Sender:?([^\n]+)/i) || text.match(/Ship\s+From:?([^\n]+)/i);
+    if (fromMatch) {
+      data.sender.name = fromMatch[1].trim();
+      console.log(`Found sender: ${data.sender.name}`);
+    }
+    
+    const toMatch = text.match(/To:?([^\n]+)/i) || text.match(/Recipient:?([^\n]+)/i) || text.match(/Ship\s+To:?([^\n]+)/i);
+    if (toMatch) {
+      data.recipient.name = toMatch[1].trim();
+      console.log(`Found recipient: ${data.recipient.name}`);
+    }
+    
+    // Extract service type
+    const serviceMatch = text.match(/Service:?([^\n]+)/i) || text.match(/Service\s+Type:?([^\n]+)/i);
+    if (serviceMatch) {
+      data.serviceType = serviceMatch[1].trim();
+      console.log(`Found service type: ${data.serviceType}`);
+    }
+    
+    // Extract weight
+    const weightMatch = text.match(/Weight:?([^\n]+)/i) || text.match(/(\d+\.?\d*)\s*(lbs|kg|oz)/i);
+    if (weightMatch) {
+      data.weight = weightMatch[0].trim();
+      console.log(`Found weight: ${data.weight}`);
+    }
+  } catch (error) {
+    console.error('Error extracting information:', error);
+  }
+  
+  return data;
+}
+
+/**
+ * Generate ZPL code based on extracted information
+ * @param {Object} data - The extracted data
+ * @returns {string} ZPL code
+ */
+function generateZPL(data) {
+  console.log('Generating ZPL code');
+  
+  // Create a dynamic ZPL code based on the extracted information
+  let zplCode = `^XA`;
+  
+  // Add tracking number barcode if available
+  if (data.trackingNumber) {
+    zplCode += `\n^FO50,50^BY3\n^BCN,100,Y,N,N\n^FD${data.trackingNumber}^FS`;
+    zplCode += `\n^FO50,170^A0N,30,30^FD${data.trackingNumber}^FS`;
+  }
+  
+  // Add sender information
+  let yPos = 220;
+  zplCode += `\n^FO50,${yPos}^A0N,25,25^FDFrom:^FS`;
+  yPos += 30;
+  if (data.sender.name) {
+    zplCode += `\n^FO70,${yPos}^A0N,25,25^FD${data.sender.name}^FS`;
+    yPos += 30;
+  }
+  
+  // Add recipient information
+  yPos += 20;
+  zplCode += `\n^FO50,${yPos}^A0N,25,25^FDTo:^FS`;
+  yPos += 30;
+  if (data.recipient.name) {
+    zplCode += `\n^FO70,${yPos}^A0N,25,25^FD${data.recipient.name}^FS`;
+    yPos += 30;
+  }
+  
+  // Add service type if available
+  if (data.serviceType) {
+    yPos += 20;
+    zplCode += `\n^FO50,${yPos}^A0N,25,25^FDService: ${data.serviceType}^FS`;
+  }
+  
+  // Add weight if available
+  if (data.weight) {
+    yPos += 30;
+    zplCode += `\n^FO50,${yPos}^A0N,25,25^FDWeight: ${data.weight}^FS`;
+  }
+  
+  // End ZPL code
+  zplCode += `\n^XZ`;
+  
+  return zplCode;
+}
+
+/**
+ * Parse multipart form data from an event
+ * @param {Object} event - The Lambda event
+ * @returns {Object} Parsed form data
+ */
+async function parseMultipartForm(event) {
+  return new Promise((resolve, reject) => {
+    if (!event.headers) {
+      return reject(new Error('No headers in event'));
+    }
+
+    // Get content type
+    const contentType = event.headers['content-type'] || event.headers['Content-Type'];
+    console.log('Content-Type:', contentType);
+    
+    if (!contentType || !contentType.includes('multipart/form-data')) {
+      return reject(new Error('Expected multipart/form-data request'));
+    }
+
+    // Parse the body
+    try {
+      // For simplicity, we'll just extract the base64-encoded image directly
+      // In a real implementation, you'd use a proper multipart parser
+      const body = event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString() : event.body;
+      
+      // Find the boundary
+      const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+      if (!boundaryMatch) {
+        return reject(new Error('No boundary found in content-type'));
+      }
+      
+      const boundary = boundaryMatch[1] || boundaryMatch[2];
+      const parts = body.split(`--${boundary}`);
+      
+      // Process each part
+      const formData = {};
+      
+      for (const part of parts) {
+        // Skip empty parts and the closing boundary
+        if (part.trim() === '' || part.trim() === '--') continue;
+        
+        // Split headers and content
+        const [headersPart, ...contentParts] = part.split('\r\n\r\n');
+        if (!headersPart || contentParts.length === 0) continue;
+        
+        const content = contentParts.join('\r\n\r\n').trim();
+        
+        // Check if this part contains an image
+        if (headersPart.includes('filename=') && 
+            (headersPart.includes('image/jpeg') || 
+             headersPart.includes('image/png') || 
+             headersPart.includes('image/') || 
+             headersPart.includes('application/octet-stream'))) {
+          
+          // Extract the binary data
+          // Note: This is a simplified approach and may not work for all cases
+          // In a real implementation, you'd use a proper multipart parser
+          formData.image = Buffer.from(content, 'binary');
+        }
+      }
+      
+      if (!formData.image) {
+        return reject(new Error('No image found in form data'));
+      }
+      
+      resolve(formData);
+    } catch (error) {
+      console.error('Error parsing multipart form:', error);
+      reject(new Error(`Failed to parse multipart form: ${error.message}`));
+    }
+  });
+}
