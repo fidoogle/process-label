@@ -12,6 +12,13 @@
   # Environment variables will be set in the Netlify UI
   # SUPABASE_ANON_KEY = "your-supabase-anon-key"
 
+[functions.process-label]
+  # Explicitly include environment variables for this function
+  # The actual values will be set in the Netlify UI
+  included_files = ["**"]
+  external_node_modules = ["node-fetch", "form-data"]
+
+
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"

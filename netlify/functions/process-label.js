@@ -64,14 +64,45 @@ exports.handler = async (event, context) => {
     console.log(`Image converted to base64, length: ${base64Image.length}`);
 
     // Use Replicate API instead of Hugging Face
-    const replicateApiKey = process.env.REPLICATE_API_KEY;
+    // Debug all environment variables
+    console.log('Environment variables available:', Object.keys(process.env).join(', '));
+    
+    // Try to get API key from various sources
+    // 1. Environment variables (different case variations)
+    // 2. Request headers (for development/testing only)
+    // 3. Query parameters (for development/testing only)
+    let replicateApiKey = process.env.REPLICATE_API_KEY || process.env.replicate_api_key || process.env.Replicate_Api_Key;
+    
+    // Check request headers for API key (ONLY FOR DEVELOPMENT/TESTING)
+    if (!replicateApiKey && event.headers) {
+      const authHeader = event.headers['x-replicate-api-key'] || event.headers['X-Replicate-Api-Key'];
+      if (authHeader) {
+        console.log('Found API key in request headers');
+        replicateApiKey = authHeader;
+      }
+    }
+    
+    // Check query parameters for API key (ONLY FOR DEVELOPMENT/TESTING)
+    if (!replicateApiKey && event.queryStringParameters) {
+      const queryApiKey = event.queryStringParameters.api_key || event.queryStringParameters.apiKey;
+      if (queryApiKey) {
+        console.log('Found API key in query parameters');
+        replicateApiKey = queryApiKey;
+      }
+    }
+    
     console.log(`Replicate API Key exists: ${!!replicateApiKey}`);
+    console.log(`REPLICATE_API_KEY from env: ${!!process.env.REPLICATE_API_KEY}`);
     
     if (!replicateApiKey) {
-      console.log('Missing Replicate API key');
+      console.log('Missing Replicate API key from all sources');
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: 'Replicate API key configuration error' })
+        body: JSON.stringify({ 
+          error: 'Replicate API key configuration error',
+          message: 'Please set the REPLICATE_API_KEY environment variable in your Netlify dashboard',
+          availableEnvVars: Object.keys(process.env).filter(key => !key.includes('AWS') && !key.includes('SECRET')).join(', ')
+        })
       };
     }
 
