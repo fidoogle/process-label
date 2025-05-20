@@ -117,9 +117,11 @@ exports.handler = async (event, context) => {
       // Input parameters
       input: {
         image: `data:image/jpeg;base64,${base64Image}`,
-        caption: true
+        caption: "Generate a detailed caption for this shipping label"
       }
     };
+    
+    console.log('Replicate request body prepared');
     
     let response;
     try {
