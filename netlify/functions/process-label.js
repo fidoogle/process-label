@@ -63,52 +63,48 @@ exports.handler = async (event, context) => {
     const base64Image = image.toString('base64');
     console.log(`Image converted to base64, length: ${base64Image.length}`);
 
-    // Hugging Face Inference API call
-    const huggingFaceApiKey = process.env.HUGGINGFACE_API_KEY;
-    console.log(`API Key exists: ${!!huggingFaceApiKey}`);
-    console.log(`API Key length: ${huggingFaceApiKey ? huggingFaceApiKey.length : 0}`);
+    // Use Replicate API instead of Hugging Face
+    const replicateApiKey = process.env.REPLICATE_API_KEY;
+    console.log(`Replicate API Key exists: ${!!replicateApiKey}`);
     
-    if (!huggingFaceApiKey) {
-      console.log('Missing Hugging Face API key');
+    if (!replicateApiKey) {
+      console.log('Missing Replicate API key');
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: 'API key configuration error' })
+        body: JSON.stringify({ error: 'Replicate API key configuration error' })
       };
     }
 
-    // Try a different model that's definitely available
-    // const modelUrl = "https://api-inference.huggingface.co/models/microsoft/florence-2-base";
-    // Other alternatives to try:
-    // const modelUrl = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large";
-    const modelUrl = "https://api-inference.huggingface.co/models/nlpconnect/vit-gpt2-image-captioning";
-    console.log(`Making request to Hugging Face API: ${modelUrl}`);
+    // Use Salesforce BLIP model on Replicate
+    const replicateUrl = "https://api.replicate.com/v1/predictions";
+    console.log(`Making request to Replicate API: ${replicateUrl}`);
     
-    // Prepare the request body for the image captioning model
+    // Prepare the request body for Replicate
     const requestBody = {
-      // For most image models, just sending the base64 image is sufficient
-      inputs: base64Image,
-      // Simpler parameters for the image model
-      parameters: { 
-        max_new_tokens: 100
-      },
-      options: { wait_for_model: true }
+      // Specify the model to use
+      version: "2e1dddc8621f72155f24cf2e0adbde548458d3cab9f00c0139eea840d0ac4746", // Salesforce BLIP model
+      // Input parameters
+      input: {
+        image: `data:image/jpeg;base64,${base64Image}`,
+        caption: true
+      }
     };
     
     let response;
     try {
-      console.log('Sending request to Hugging Face API...');
-      response = await fetch(modelUrl, {
+      console.log('Sending request to Replicate API...');
+      response = await fetch(replicateUrl, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${huggingFaceApiKey}`,
+          Authorization: `Token ${replicateApiKey}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(requestBody)
       });
       
-      console.log(`Hugging Face API response status: ${response.status}`);
+      console.log(`Replicate API response status: ${response.status}`);
     } catch (apiError) {
-      console.error('Error calling Hugging Face API:', apiError);
+      console.error('Error calling Replicate API:', apiError);
       return {
         statusCode: 500,
         body: JSON.stringify({ error: `API call failed: ${apiError.message}` })
@@ -118,10 +114,10 @@ exports.handler = async (event, context) => {
     if (!response.ok) {
       try {
         const errorText = await response.text();
-        console.log(`Hugging Face API error response: ${errorText}`);
+        console.log(`Replicate API error response: ${errorText}`);
         return {
           statusCode: 500,
-          body: JSON.stringify({ error: `Hugging Face API error: ${errorText}` })
+          body: JSON.stringify({ error: `Replicate API error: ${errorText}` })
         };
       } catch (textError) {
         console.error('Error reading error response:', textError);
@@ -132,16 +128,69 @@ exports.handler = async (event, context) => {
       }
     }
 
-    console.log('Hugging Face API response was successful, parsing JSON...');
-    let result;
+    console.log('Replicate API response was successful, parsing JSON...');
+    let predictionResponse;
     try {
-      result = await response.json();
+      predictionResponse = await response.json();
       console.log('API response parsed successfully');
+      console.log(`Prediction ID: ${predictionResponse.id}`);
+      console.log(`Prediction status: ${predictionResponse.status}`);
     } catch (jsonError) {
       console.error('Error parsing API response as JSON:', jsonError);
       return {
         statusCode: 500,
         body: JSON.stringify({ error: `Failed to parse API response: ${jsonError.message}` })
+      };
+    }
+    
+    // Replicate API is asynchronous, so we need to poll for the result
+    const maxRetries = 10;
+    let retries = 0;
+    let result = null;
+    
+    while (retries < maxRetries) {
+      console.log(`Polling for result, attempt ${retries + 1}/${maxRetries}`);
+      
+      try {
+        const statusResponse = await fetch(`https://api.replicate.com/v1/predictions/${predictionResponse.id}`, {
+          headers: {
+            Authorization: `Token ${replicateApiKey}`
+          }
+        });
+        
+        if (!statusResponse.ok) {
+          console.log(`Error checking prediction status: ${statusResponse.status}`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          retries++;
+          continue;
+        }
+        
+        const statusData = await statusResponse.json();
+        console.log(`Current status: ${statusData.status}`);
+        
+        if (statusData.status === 'succeeded') {
+          result = statusData.output;
+          break;
+        } else if (statusData.status === 'failed') {
+          return {
+            statusCode: 500,
+            body: JSON.stringify({ error: `Prediction failed: ${statusData.error || 'Unknown error'}` })
+          };
+        }
+        
+        // Wait before polling again
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } catch (pollError) {
+        console.error('Error polling for result:', pollError);
+      }
+      
+      retries++;
+    }
+    
+    if (!result) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'Timed out waiting for prediction result' })
       };
     }
     
