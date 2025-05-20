@@ -176,77 +176,145 @@ exports.handler = async (event, context) => {
       };
     }
     
-    // Replicate API is asynchronous, so we need to poll for the result
-    const maxRetries = 20; // Increase max retries
-    let retries = 0;
-    let result = null;
+    // Check if this is an initial request or a status check for an existing prediction
+    const predictionId = event.queryStringParameters?.predictionId;
     
-    console.log(`Starting to poll for prediction ${predictionResponse.id}`);
-    
-    while (retries < maxRetries) {
-      console.log(`Polling for result, attempt ${retries + 1}/${maxRetries}`);
-      
+    // If we have a predictionId in the query parameters, this is a status check
+    if (predictionId) {
+      console.log(`This is a status check for prediction ${predictionId}`);
       try {
-        const statusUrl = `https://api.replicate.com/v1/predictions/${predictionResponse.id}`;
-        console.log(`Checking status at: ${statusUrl}`);
-        
+        const statusUrl = `https://api.replicate.com/v1/predictions/${predictionId}`;
         const statusResponse = await fetch(statusUrl, {
           headers: {
             Authorization: `Token ${replicateApiKey}`
           }
         });
         
-        console.log(`Status response code: ${statusResponse.status}`);
-        
         if (!statusResponse.ok) {
           const errorText = await statusResponse.text();
-          console.log(`Error checking prediction status: ${statusResponse.status}, ${errorText}`);
-          await new Promise(resolve => setTimeout(resolve, 2000)); // Longer wait on error
-          retries++;
-          continue;
+          return {
+            statusCode: 500,
+            body: JSON.stringify({ error: `Error checking prediction: ${errorText}` })
+          };
         }
         
         const statusData = await statusResponse.json();
-        console.log(`Current status: ${statusData.status}`);
-        console.log(`Full status data: ${JSON.stringify(statusData)}`);
+        console.log(`Status check for ${predictionId}: ${statusData.status}`);
         
         if (statusData.status === 'succeeded') {
+          // Prediction is complete, process the result
           console.log('Prediction succeeded!');
           result = statusData.output;
           console.log(`Raw output: ${JSON.stringify(result)}`);
-          break;
+          // Continue with processing the result below
         } else if (statusData.status === 'failed') {
-          console.log(`Prediction failed: ${statusData.error || 'Unknown error'}`);
           return {
             statusCode: 500,
+            body: JSON.stringify({ error: `Prediction failed: ${statusData.error || 'Unknown error'}` })
+          };
+        } else {
+          // Still processing, return status info
+          return {
+            statusCode: 202, // Accepted but still processing
             body: JSON.stringify({ 
-              error: `Prediction failed: ${statusData.error || 'Unknown error'}`,
-              details: statusData
+              status: statusData.status,
+              message: 'Prediction still processing',
+              predictionId: predictionId
             })
           };
-        } else if (statusData.status === 'processing') {
-          console.log('Prediction still processing...');
-        } else {
-          console.log(`Unknown status: ${statusData.status}`);
+        }
+      } catch (error) {
+        console.error('Error checking prediction status:', error);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: `Error checking prediction: ${error.message}` })
+        };
+      }
+    } else {
+      // This is an initial request, start polling but with a limited number of attempts
+      // to avoid Netlify function timeout
+      const maxRetries = 5; // Limited retries for initial function call
+      let retries = 0;
+      let result = null;
+      
+      console.log(`Starting to poll for prediction ${predictionResponse.id}`);
+      
+      while (retries < maxRetries) {
+        console.log(`Polling for result, attempt ${retries + 1}/${maxRetries}`);
+        
+        try {
+          const statusUrl = `https://api.replicate.com/v1/predictions/${predictionResponse.id}`;
+          console.log(`Checking status at: ${statusUrl}`);
+          
+          const statusResponse = await fetch(statusUrl, {
+            headers: {
+              Authorization: `Token ${replicateApiKey}`
+            }
+          });
+          
+          console.log(`Status response code: ${statusResponse.status}`);
+          
+          if (!statusResponse.ok) {
+            const errorText = await statusResponse.text();
+            console.log(`Error checking prediction status: ${statusResponse.status}, ${errorText}`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            retries++;
+            continue;
+          }
+          
+          const statusData = await statusResponse.json();
+          console.log(`Current status: ${statusData.status}`);
+          
+          if (statusData.status === 'succeeded') {
+            console.log('Prediction succeeded!');
+            result = statusData.output;
+            console.log(`Raw output: ${JSON.stringify(result)}`);
+            break;
+          } else if (statusData.status === 'failed') {
+            console.log(`Prediction failed: ${statusData.error || 'Unknown error'}`);
+            return {
+              statusCode: 500,
+              body: JSON.stringify({ error: `Prediction failed: ${statusData.error || 'Unknown error'}` })
+            };
+          } else if (statusData.status === 'processing' || statusData.status === 'starting') {
+            console.log('Prediction still processing...');
+            
+            // If we're about to hit the max retries, return early with the prediction ID
+            // so the client can check status later
+            if (retries === maxRetries - 1) {
+              console.log('Approaching function timeout, returning prediction ID for client polling');
+              return {
+                statusCode: 202, // Accepted but still processing
+                body: JSON.stringify({ 
+                  status: 'processing',
+                  message: 'Image analysis still in progress. Please check status using the predictionId.',
+                  predictionId: predictionResponse.id
+                })
+              };
+            }
+          }
+          
+          // Wait before polling again
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (pollError) {
+          console.error('Error polling for result:', pollError);
         }
         
-        // Wait before polling again - increase wait time for each retry
-        const waitTime = 1000 + (retries * 500);
-        console.log(`Waiting ${waitTime}ms before next poll`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-      } catch (pollError) {
-        console.error('Error polling for result:', pollError);
-        console.error('Error details:', pollError.stack);
+        retries++;
       }
       
-      retries++;
-    }
-    
-    if (!result) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: 'Timed out waiting for prediction result' })
-      };
+      // If we've exhausted our retries without getting a result, return the prediction ID
+      if (!result) {
+        console.log('Function timeout approaching, returning prediction ID for client polling');
+        return {
+          statusCode: 202, // Accepted but still processing
+          body: JSON.stringify({ 
+            status: 'processing',
+            message: 'Image analysis still in progress. Please check status using the predictionId.',
+            predictionId: predictionResponse.id
+          })
+        };
+      }
     }
     
     // Process the Replicate API result

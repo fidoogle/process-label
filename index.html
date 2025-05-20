@@ -5,9 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Shipping Label to ZPL Converter</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; }
-    #result { margin-top: 20px; }
-    .labelary-link { word-break: break-all; }
+    body { font-family: Arial, sans-serif; margin: 20px; max-width: 800px; margin: 0 auto; padding: 20px; }
+    h1 { color: #333; }
+    #result { margin-top: 20px; padding: 15px; border-radius: 5px; background-color: #f8f9fa; }
+    .labelary-link { word-break: break-all; color: #0066cc; }
+    pre { background-color: #f1f1f1; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    
+    /* Loading indicator */
+    .processing { text-align: center; padding: 20px; }
+    .loader { display: inline-block; width: 40px; height: 40px; margin: 10px auto; border: 4px solid #f3f3f3; border-radius: 50%; border-top: 4px solid #3498db; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .status { margin-top: 10px; font-size: 0.9em; color: #666; }
+    
+    /* Debug information */
+    details { margin-top: 20px; border: 1px solid #ddd; border-radius: 4px; }
+    summary { padding: 10px; background-color: #f1f1f1; cursor: pointer; }
+    .debug-info { padding: 10px; }
+    .debug-info h4 { margin-top: 10px; margin-bottom: 5px; }
+    
+    /* Button and input styling */
+    button { background-color: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; }
+    button:hover { background-color: #45a049; }
+    input[type="file"] { margin-right: 10px; }
   </style>
   <script src="/config.js"></script>
 </head>
@@ -37,7 +56,7 @@
       const formData = new FormData();
       formData.append('image', fileInput.files[0]);
 
-      resultDiv.innerHTML = 'Processing...';
+      resultDiv.innerHTML = '<div class="processing">Processing your image...<div class="loader"></div></div>';
 
       try {
         // Determine which API endpoint to use based on deployment platform
@@ -55,27 +74,110 @@
           console.log(`Using Supabase Edge Functions: ${apiUrl}`);
         }
         
-        const response = await fetch(apiUrl, {
+        // Initial request to start processing
+        let response = await fetch(apiUrl, {
           method: 'POST',
           body: formData,
           headers: headers
         });
 
-        if (!response.ok) throw new Error('Failed to process image');
-        const data = await response.json();
+        if (!response.ok) throw new Error(`Failed to process image: ${response.status}`);
+        let data = await response.json();
+        
+        // Check if we need to poll for results (status code 202)
+        if (response.status === 202 && data.predictionId) {
+          resultDiv.innerHTML = `<div class="processing">
+            Image analysis in progress...<br>
+            This may take up to 30 seconds.<br>
+            <div class="loader"></div>
+          </div>`;
+          
+          // Poll for results
+          data = await pollForResults(apiUrl, data.predictionId, headers);
+        }
+        
+        // Display results
         const zplCode = data.zpl;
         const description = data.description || 'No description available';
         const labelaryUrl = `http://labelary.com/viewer.html?zpl=${encodeURIComponent(zplCode)}`;
+
+        // Include debug info if available
+        let debugHtml = '';
+        if (data.debug) {
+          debugHtml = `
+            <details>
+              <summary>Debug Information</summary>
+              <div class="debug-info">
+                <h4>Model Output:</h4>
+                <pre>${data.debug.modelOutput}</pre>
+                <h4>Extracted Data:</h4>
+                <pre>${JSON.stringify(data.debug.extractedData, null, 2)}</pre>
+              </div>
+            </details>
+          `;
+        }
 
         resultDiv.innerHTML = `
           <p><strong>Description:</strong> ${description}</p>
           <p><strong>ZPL Code:</strong></p>
           <pre>${zplCode}</pre>
           <p><strong>View Rendered Label:</strong> <a href="${labelaryUrl}" target="_blank" class="labelary-link">${labelaryUrl}</a></p>
+          ${debugHtml}
         `;
       } catch (error) {
         resultDiv.innerHTML = `Error: ${error.message}`;
       }
+    }
+    
+    // Function to poll for results
+    async function pollForResults(apiUrl, predictionId, headers = {}) {
+      const maxRetries = 15; // Maximum number of retries (15 * 2 seconds = 30 seconds max)
+      let retries = 0;
+      
+      while (retries < maxRetries) {
+        try {
+          // Add predictionId as a query parameter
+          const pollUrl = `${apiUrl}?predictionId=${predictionId}`;
+          console.log(`Polling for results: ${pollUrl}`);
+          
+          const response = await fetch(pollUrl, {
+            method: 'POST', // Keep using POST to match the original request
+            headers: headers
+          });
+          
+          if (!response.ok) throw new Error(`Failed to check status: ${response.status}`);
+          const data = await response.json();
+          
+          // If processing is complete, return the data
+          if (response.status === 200) {
+            return data;
+          }
+          
+          // If still processing, wait and try again
+          if (response.status === 202) {
+            console.log(`Still processing: ${data.status}`);
+            document.getElementById('result').innerHTML = `<div class="processing">
+              Image analysis in progress...<br>
+              This may take up to 30 seconds.<br>
+              <div class="loader"></div>
+              <div class="status">Status: ${data.status} (Attempt ${retries + 1}/${maxRetries})</div>
+            </div>`;
+            
+            // Wait 2 seconds before polling again
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            retries++;
+            continue;
+          }
+          
+          // Unexpected response
+          throw new Error(`Unexpected response: ${response.status}`);
+        } catch (error) {
+          console.error('Error polling for results:', error);
+          throw error;
+        }
+      }
+      
+      throw new Error('Timed out waiting for image analysis to complete');
     }
   </script>
 </body>

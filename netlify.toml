@@ -17,6 +17,8 @@
   # The actual values will be set in the Netlify UI
   included_files = ["**"]
   external_node_modules = ["node-fetch", "form-data"]
+  # Increase timeout to 26 seconds (max allowed is 26 seconds)
+  timeout = 26
 
 
 [functions]
